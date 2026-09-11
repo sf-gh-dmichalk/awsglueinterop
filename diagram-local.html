@@ -1,0 +1,317 @@
+1... <!DOCTYPE html>
+2... <html lang="en">
+3... <head>
+4...   <meta charset="utf-8" />
+5...   <meta name="viewport" content="width=device-width, initial-scale=1" />
+6...   <!-- Local preview version - use diagram.html for Snowflake -->
+7...   <title>AWS Glue + Snowflake Integration Architecture</title>
+8...   <script type="application/json" id="snowflake-report-metadata">
+9...   {
+10...     "generated": "2026-09-11",
+11...     "intent": "Architecture diagram showing AWS Glue and Snowflake integration with S3, IAM, Lake Formation, and catalog/external volume connections",
+12...     "sections": [
+13...       { "id": "architecture", "title": "Architecture Diagram",
+14...         "dataSources": [],
+15...         "producerNotes": "Mermaid flowchart showing AWS and Snowflake components and their connections." },
+16...       { "id": "performance", "title": "Performance Comparison",
+17...         "dataSources": [],
+18...         "producerNotes": "Static comparison table of external flat vs external partitioned vs Iceberg table features." }
+19...     ]
+20...   }
+21...   </script>
+22...   <style>
+23...     :root { color-scheme: light dark; }
+24...     body {
+25...       font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
+26...       max-width: 880px; width: 100%; box-sizing: border-box;
+27...       margin: 0 auto; padding: clamp(16px, 4vw, 24px);
+28...       color: light-dark(#1f2937, #e5e7eb);
+29...       background: light-dark(#ffffff, #0f172a);
+30...       line-height: 1.6;
+31...     }
+32...     h1 { color: light-dark(#0f172a, #f1f5f9); font-size: 1.75rem; margin-bottom: 4px; }
+33...     h2 { color: light-dark(#1e3a5f, #93c5fd); font-size: 1.3rem; margin-top: 2rem; border-bottom: 2px solid light-dark(#e2e8f0, #334155); padding-bottom: 6px; }
+34...     h3 { color: light-dark(#334155, #cbd5e1); font-size: 1.05rem; margin-top: 1.2rem; }
+35...     .subtitle { color: light-dark(#64748b, #94a3b8); font-size: 0.95rem; margin-top: 0; }
+36...     img, svg { max-width: 100%; height: auto; }
+37...     .diagram-wrap { overflow-x: auto; margin: 16px 0; }
+38...     .table-wrap { overflow-x: auto; margin: 16px 0; }
+39...     table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+40...     th, td { border: 1px solid light-dark(#d1d5db, #374151); padding: 8px 12px; text-align: left; }
+41...     th { background: light-dark(#f1f5f9, #1e293b); font-weight: 600; color: light-dark(#1e3a5f, #93c5fd); }
+42...     tr:nth-child(even) td { background: light-dark(#f8fafc, #0f172a); }
+43...     tr:nth-child(odd) td { background: light-dark(#ffffff, #1e293b); }
+44...     .badge-yes { display: inline-block; background: light-dark(#dcfce7, #14532d); color: light-dark(#166534, #86efac); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; }
+45...     .badge-no { display: inline-block; background: light-dark(#fee2e2, #450a0a); color: light-dark(#991b1b, #fca5a5); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; }
+46...     .badge-partial { display: inline-block; background: light-dark(#fef9c3, #422006); color: light-dark(#854d0e, #fde047); padding: 2px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: 600; }
+47...     .legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 16px 0; padding: 12px 16px; background: light-dark(#f8fafc, #1e293b); border-radius: 8px; border: 1px solid light-dark(#e2e8f0, #334155); font-size: 0.85rem; }
+48...     .legend-item { display: flex; align-items: center; gap: 6px; }
+49...     .legend-color { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+50...     .accounts-bar { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+51...     .account-tag { padding: 6px 14px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; }
+52...     .account-aws { background: light-dark(#fff7ed, #431407); color: light-dark(#c2410c, #fdba74); border: 1px solid light-dark(#fed7aa, #7c2d12); }
+53...     .account-sf { background: light-dark(#eff6ff, #172554); color: light-dark(#1d4ed8, #93c5fd); border: 1px solid light-dark(#bfdbfe, #1e3a5f); }
+54...     .blocked-section { margin-top: 1.5rem; padding: 14px 18px; background: light-dark(#fef2f2, #1c1017); border: 1px dashed light-dark(#fca5a5, #7f1d1d); border-radius: 8px; }
+55...     .blocked-section h3 { color: light-dark(#991b1b, #fca5a5); margin-top: 0; }
+56...     .blocked-section ul { margin: 6px 0; padding-left: 20px; }
+57...     .blocked-section li { color: light-dark(#6b7280, #9ca3af); margin: 4px 0; }
+58...     footer { margin-top: 2rem; padding-top: 12px; border-top: 1px solid light-dark(#e2e8f0, #334155); color: light-dark(#94a3b8, #64748b); font-size: 0.8rem; }
+59...   </style>
+60... </head>
+61... <body>
+62... 
+63...   <h1>AWS Glue + Snowflake Integration Architecture</h1>
+64...   <p class="subtitle">Catalog Integration, External Tables, and Iceberg Tables via AWS Glue Data Catalog</p>
+65... 
+66...   <div class="accounts-bar">
+67...     <span class="account-tag account-aws">AWS 913524911227 &middot; us-west-2</span>
+68...     <span class="account-tag account-sf">Snowflake FXC11617</span>
+69...   </div>
+70... 
+71...   <h2 id="architecture">Architecture Diagram</h2>
+72... 
+73...   <div class="legend">
+74...     <div class="legend-item"><div class="legend-color" style="background:#3b82f6;"></div> Snowflake objects</div>
+75...     <div class="legend-item"><div class="legend-color" style="background:#f97316;"></div> AWS services</div>
+76...     <div class="legend-item"><div class="legend-color" style="background:#22c55e;"></div> Working paths</div>
+77...     <div class="legend-item"><div class="legend-color" style="background:#ef4444;"></div> Blocked / Private Preview</div>
+78...   </div>
+79... 
+80...   <div class="diagram-wrap">
+81...     <pre class="mermaid">
+82... flowchart TB
+83...   subgraph AWS["<b>AWS Account 913524911227 (us-west-2)</b>"]
+84...     direction TB
+85...     subgraph S3["S3: dmichalk-glue-sandbox"]
+86...       direction TB
+87...       HP["data/hive/customers/\n(Parquet, 100 rows)"]
+88...       HO["data/hive/orders/\n(Parquet, 500 rows)"]
+89...       PO["data/partitioned/orders/\n(Parquet, 1M rows, 48 files\nyear/month partitioned)"]
+90...       IP["data/iceberg/products/\n(Iceberg, 50 rows)"]
+91...       IO["data/iceberg/orders_partitioned/\n(Iceberg, 1M rows\nyear/month partitioned)"]
+92...     end
+93... 
+94...     subgraph GLUE["Glue Data Catalog: dmichalk_sandbox_db"]
+95...       direction TB
+96...       GC["customers\n(Hive/Parquet)"]
+97...       GO["orders\n(Hive/Parquet)"]
+98...       GP["products\n(Iceberg)"]
+99...       GPO["orders_partitioned\n(Iceberg, partitioned)"]
+100...     end
+101... 
+102...     subgraph IAM["IAM Role: dmichalk-snowflake-glue-access"]
+103...       direction TB
+104...       P1["Policy: glue-catalog-access"]
+105...       P2["Policy: s3-data-access"]
+106...       P3["Policy: lakeformation-access"]
+107...       TRUST["Trust: Snowflake IAM user\n+ external IDs"]
+108...     end
+109... 
+110...     LF["Lake Formation\nS3 registered, DB grants"]
+111...   end
+112... 
+113...   subgraph SF["<b>Snowflake Account FXC11617</b>"]
+114...     direction TB
+115...     STS["sts:AssumeRole"]
+116... 
+117...     subgraph INTEGRATIONS["Integrations"]
+118...       direction TB
+119...       EV["External Volume\nDMICHALK_GLUE_EXT_VOL\ns3://dmichalk-glue-sandbox/"]
+120...       SI["Storage Integration\nDMICHALK_S3_INTEGRATION"]
+121...       CI["Catalog Integration\nDMICHALK_GLUE_ICEBERG_INT\nGLUE, TABLE_FORMAT=ICEBERG ✅"]
+122...       STG["Stage\nDMICHALK_S3_STAGE"]
+123...     end
+124... 
+125...     subgraph DB["DMICHALK_GLUE_DB.GLUE_TABLES"]
+126...       direction TB
+127...       T1["PRODUCTS\n(Iceberg, 50 rows) ✅"]
+128...       T2["ORDERS_ICEBERG_PARTITIONED\n(Iceberg, 1M rows) ✅"]
+129...       T3["ORDERS_EXTERNAL_FLAT\n(External Table, 1M rows\nno pruning) ✅"]
+130...       T4["ORDERS_EXTERNAL_PARTITIONED\n(External Table, 1M rows\npath-based pruning) ✅"]
+131...     end
+132...   end
+133... 
+134...   STS -->|"sts:AssumeRole"| IAM
+135...   CI -->|"glue:GetTable\nglue:GetTables"| GLUE
+136...   EV -->|"s3:GetObject\ns3:ListBucket"| S3
+137...   STG -->|"s3:GetObject\ns3:ListBucket"| S3
+138...   SI -->|"s3:GetObject"| S3
+139... 
+140...   CI --> T1
+141...   CI --> T2
+142...   EV --> T1
+143...   EV --> T2
+144...   STG --> T3
+145...   STG --> T4
+146... 
+147...   GP -.->|"metadata"| IP
+148...   GPO -.->|"metadata"| IO
+149...   GC -.->|"metadata"| HP
+150...   GO -.->|"metadata"| HO
+151... 
+152...   LF -.->|"grants"| GLUE
+153...   LF -.->|"S3 registration"| S3
+154... 
+155...   classDef awsStyle fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12
+156...   classDef sfStyle fill:#eff6ff,stroke:#3b82f6,stroke-width:2px,color:#1e3a5f
+157...   classDef s3Style fill:#fef3c7,stroke:#f59e0b,stroke-width:1px,color:#78350f
+158...   classDef glueStyle fill:#fce7f3,stroke:#ec4899,stroke-width:1px,color:#831843
+159...   classDef iamStyle fill:#fee2e2,stroke:#ef4444,stroke-width:1px,color:#7f1d1d
+160...   classDef sfIntStyle fill:#dbeafe,stroke:#3b82f6,stroke-width:1px,color:#1e40af
+161...   classDef sfTblStyle fill:#dcfce7,stroke:#22c55e,stroke-width:1px,color:#166534
+162...   classDef lfStyle fill:#f3e8ff,stroke:#a855f7,stroke-width:1px,color:#6b21a8
+163... 
+164...   class AWS awsStyle
+165...   class SF sfStyle
+166...   class HP,HO,PO,IP,IO s3Style
+167...   class GC,GO,GP,GPO glueStyle
+168...   class P1,P2,P3,TRUST iamStyle
+169...   class EV,SI,CI,STG,STS sfIntStyle
+170...   class T1,T2,T3,T4 sfTblStyle
+171...   class LF lfStyle
+172...     </pre>
+173...   </div>
+174... 
+175...   <div class="blocked-section">
+176...     <h3>Blocked / Private Preview Paths</h3>
+177...     <ul>
+178...       <li><strong>TABLE_FORMAT=HIVE</strong> &mdash; Catalog integration with Hive table format is in Private Preview; cannot create Iceberg tables from Hive-registered Parquet via Glue catalog</li>
+179...       <li><strong>TABLE_FORMAT=NONE (Parquet Direct)</strong> &mdash; Direct Parquet read through catalog integration is in Private Preview</li>
+180...       <li><strong>Catalog-Linked Database via Glue REST</strong> &mdash; Requires Lake Formation admin privileges to configure the REST-based catalog endpoint</li>
+181...     </ul>
+182...   </div>
+183... 
+184...   <h2 id="performance">Performance Comparison</h2>
+185...   <h3>External Tables vs Iceberg Tables</h3>
+186... 
+187...   <div class="table-wrap">
+188...     <table>
+189...       <thead>
+190...         <tr>
+191...           <th>Feature</th>
+192...           <th>External Flat</th>
+193...           <th>External Partitioned</th>
+194...           <th>Iceberg</th>
+195...         </tr>
+196...       </thead>
+197...       <tbody>
+198...         <tr>
+199...           <td><strong>Partition Pruning</strong></td>
+200...           <td><span class="badge-no">None</span></td>
+201...           <td><span class="badge-partial">Path-based</span></td>
+202...           <td><span class="badge-yes">Spec-based</span></td>
+203...         </tr>
+204...         <tr>
+205...           <td><strong>Column Reads</strong></td>
+206...           <td><span class="badge-no">Semi-structured</span></td>
+207...           <td><span class="badge-no">Semi-structured</span></td>
+208...           <td><span class="badge-yes">Native Parquet</span></td>
+209...         </tr>
+210...         <tr>
+211...           <td><strong>Row-group Stats</strong></td>
+212...           <td><span class="badge-no">No</span></td>
+213...           <td><span class="badge-no">No</span></td>
+214...           <td><span class="badge-yes">Yes (min/max)</span></td>
+215...         </tr>
+216...         <tr>
+217...           <td><strong>Predicate Pushdown</strong></td>
+218...           <td><span class="badge-no">No</span></td>
+219...           <td><span class="badge-no">No</span></td>
+220...           <td><span class="badge-yes">Yes</span></td>
+221...         </tr>
+222...         <tr>
+223...           <td><strong>Table Format</strong></td>
+224...           <td>External Table + Stage</td>
+225...           <td>External Table + Stage</td>
+226...           <td>Iceberg Table + Catalog Int.</td>
+227...         </tr>
+228...         <tr>
+229...           <td><strong>Catalog Integration</strong></td>
+230...           <td>Not required</td>
+231...           <td>Not required</td>
+232...           <td><span class="badge-yes">Required (Glue)</span></td>
+233...         </tr>
+234...         <tr>
+235...           <td><strong>Schema Evolution</strong></td>
+236...           <td>Manual refresh</td>
+237...           <td>Manual refresh</td>
+238...           <td><span class="badge-yes">Automatic</span></td>
+239...         </tr>
+240...         <tr>
+241...           <td><strong>Query Pattern</strong></td>
+242...           <td>VALUE:col::type</td>
+243...           <td>VALUE:col::type</td>
+244...           <td><span class="badge-yes">SELECT col</span></td>
+245...         </tr>
+246...       </tbody>
+247...     </table>
+248...   </div>
+249... 
+250...   <h3>Data Assets Summary</h3>
+251...   <div class="table-wrap">
+252...     <table>
+253...       <thead>
+254...         <tr>
+255...           <th>Snowflake Table</th>
+256...           <th>Type</th>
+257...           <th>Source</th>
+258...           <th>Rows</th>
+259...           <th>Status</th>
+260...         </tr>
+261...       </thead>
+262...       <tbody>
+263...         <tr>
+264...           <td>PRODUCTS</td>
+265...           <td>Iceberg</td>
+266...           <td>data/iceberg/products/</td>
+267...           <td>50</td>
+268...           <td><span class="badge-yes">Working</span></td>
+269...         </tr>
+270...         <tr>
+271...           <td>ORDERS_ICEBERG_PARTITIONED</td>
+272...           <td>Iceberg</td>
+273...           <td>data/iceberg/orders_partitioned/</td>
+274...           <td>1,000,000</td>
+275...           <td><span class="badge-yes">Working</span></td>
+276...         </tr>
+277...         <tr>
+278...           <td>ORDERS_EXTERNAL_FLAT</td>
+279...           <td>External Table</td>
+280...           <td>data/partitioned/orders/</td>
+281...           <td>1,000,000</td>
+282...           <td><span class="badge-yes">Working</span></td>
+283...         </tr>
+284...         <tr>
+285...           <td>ORDERS_EXTERNAL_PARTITIONED</td>
+286...           <td>External Table</td>
+287...           <td>data/partitioned/orders/</td>
+288...           <td>1,000,000</td>
+289...           <td><span class="badge-yes">Working</span></td>
+290...         </tr>
+291...       </tbody>
+292...     </table>
+293...   </div>
+294... 
+295...   <footer>
+296...     Generated by Cortex Code &middot; September 2026 &middot; AWS Glue + Snowflake Integration Demo
+297...   </footer>
+298... 
+299...   <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.6/dist/mermaid.min.js"></script>
+300...   <script>
+301...     mermaid.initialize({
+302...       startOnLoad: true,
+303...       securityLevel: 'strict',
+304...       theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default',
+305...       flowchart: {
+306...         useMaxWidth: true,
+307...         htmlLabels: true,
+308...         curve: 'basis',
+309...         rankSpacing: 50,
+310...         nodeSpacing: 30
+311...       }
+312...     });
+313...   </script>
+314... 
+315... </body>
+316... </html>
+317... 

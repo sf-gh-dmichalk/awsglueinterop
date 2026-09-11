@@ -13,7 +13,7 @@
 -- Tables:
 --   orders_external_flat         — External table, no partition awareness
 --   orders_external_partitioned  — External table, hive-style partition paths
---   orders_iceberg_partitioned   — Iceberg table via Glue catalog, partitioned
+--   orders_iceberg   — Iceberg table via Glue catalog, partitioned
 --
 -- After each act, we pull bytes_scanned from QUERY_HISTORY to make the
 -- comparison concrete. Tell the audience to watch the query profile too.
@@ -37,10 +37,10 @@ SELECT 'external_partitioned', COUNT(*)
   FROM orders_external_partitioned
 UNION ALL
 SELECT 'iceberg_partitioned', COUNT(*)
-  FROM orders_iceberg_partitioned;
+  FROM orders_iceberg;
 
 -- Quick look at the data shape
-SELECT * FROM orders_iceberg_partitioned LIMIT 5;
+SELECT * FROM orders_iceberg LIMIT 5;
 
 -- PRESENTER: Point out the DDL differences if asked. External tables access
 -- Parquet through semi-structured value extraction (value:col::type).
@@ -72,7 +72,7 @@ SELECT COUNT(*) AS cnt, SUM(amount) AS total
 
 -- 1c. Iceberg — manifest-level pruning
 SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
  WHERE order_year = 2024 AND order_month = 6;
 
 -- Compare bytes scanned across the three queries
@@ -107,7 +107,7 @@ SELECT COUNT(*) AS cnt, SUM(amount) AS total
  WHERE amount > 240;
 
 SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
  WHERE amount > 240;
 
 -- PRESENTER: Even the partitioned external table reads ALL files here —
@@ -131,7 +131,7 @@ SELECT COUNT(*) AS cnt, SUM(amount) AS total
  WHERE amount BETWEEN 100 AND 110;
 
 SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
  WHERE amount BETWEEN 100 AND 110;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
@@ -160,7 +160,7 @@ SELECT SUM(amount) AS total_revenue
  WHERE order_year = 2024;
 
 SELECT SUM(amount) AS total_revenue
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
  WHERE order_year = 2024;
 
 -- PRESENTER: Iceberg reads far fewer bytes — it only touches the `amount`
@@ -195,7 +195,7 @@ SELECT order_id, product, amount
    AND amount > 200;
 
 SELECT order_id, product, amount
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
  WHERE order_year = 2025
    AND order_month = 3
    AND amount > 200;
@@ -234,7 +234,7 @@ SELECT order_year, order_month, customer_tier,
        COUNT(*)    AS order_count,
        SUM(amount) AS total_revenue,
        AVG(amount) AS avg_order_value
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
  GROUP BY 1, 2, 3;
 
 -- PRESENTER: Even scanning all 1M rows, Iceberg reads fewer bytes because

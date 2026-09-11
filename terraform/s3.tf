@@ -18,20 +18,14 @@ resource "aws_s3_bucket_public_access_block" "data" {
   restrict_public_buckets = true
 }
 
-resource "aws_s3_object" "hive_customers_prefix" {
+resource "aws_s3_object" "parquet_orders_prefix" {
   bucket  = aws_s3_bucket.data.id
-  key     = "data/hive/customers/"
+  key     = "data/parquet/orders/"
   content = ""
 }
 
-resource "aws_s3_object" "hive_orders_prefix" {
+resource "aws_s3_object" "iceberg_orders_prefix" {
   bucket  = aws_s3_bucket.data.id
-  key     = "data/hive/orders/"
-  content = ""
-}
-
-resource "aws_s3_object" "iceberg_products_prefix" {
-  bucket  = aws_s3_bucket.data.id
-  key     = "data/iceberg/products/"
+  key     = "data/iceberg/orders/"
   content = ""
 }

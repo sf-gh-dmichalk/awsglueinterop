@@ -35,7 +35,7 @@ SELECT COUNT(*), SUM(amount), AVG(amount)
 
 -- 1c. Iceberg table — partition-pruned + Parquet stats + columnar pushdown
 SELECT COUNT(*), SUM(amount), AVG(amount)
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
   WHERE order_year = 2024 AND order_month = 6;
 -- Check query profile: scans 1 partition, uses Parquet row-group stats,
 -- predicate pushdown, and Snowflake's optimized Iceberg reader
@@ -61,7 +61,7 @@ SELECT customer_tier, COUNT(*) AS orders, SUM(amount) AS revenue
 
 -- 2c. Iceberg — 6 partitions + stats pruning
 SELECT customer_tier, COUNT(*) AS orders, SUM(amount) AS revenue
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
   WHERE order_year = 2024 AND order_month BETWEEN 1 AND 6
   GROUP BY customer_tier
   ORDER BY revenue DESC;
@@ -100,7 +100,7 @@ SELECT order_year, order_month,
        COUNT(*) AS orders,
        ROUND(SUM(amount), 2) AS total_revenue,
        ROUND(AVG(amount), 2) AS avg_order_value
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
   GROUP BY order_year, order_month
   ORDER BY order_year, order_month;
 
@@ -125,7 +125,7 @@ SELECT order_id, product, amount, order_date
 
 -- 4c. Iceberg — uses Parquet min/max stats to skip row groups where max(amount) <= 200
 SELECT order_id, product, amount, order_date
-  FROM orders_iceberg_partitioned
+  FROM orders_iceberg
   WHERE amount > 200
   ORDER BY amount DESC
   LIMIT 20;
