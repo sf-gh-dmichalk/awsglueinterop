@@ -177,11 +177,11 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 
 
 -- ╔══════════════════════════════════════════════════════════════════════════════╗
--- ║  SECTION 3: CATALOG-LINKED DATABASE (Glue Iceberg REST)                   ║
+-- ║  SECTION 3: ICEBERG CATALOG-LINKED DATABASE (Glue Iceberg REST)      [GA] ║
 -- ╠══════════════════════════════════════════════════════════════════════════════╣
--- ║  GA feature. Auto-discovers tables from Glue via Iceberg REST endpoint.   ║
--- ║  BLOCKED on this account: needs Lake Formation admin to grant              ║
--- ║  GetTemporaryCredentialsForTableV2 to the IAM role.                       ║
+-- ║  Auto-discovers Iceberg tables from Glue via the Iceberg REST endpoint.   ║
+-- ║  No manual CREATE TABLE — tables appear automatically.                    ║
+-- ║  BLOCKED: needs LF admin to grant GetTemporaryCredentialsForTableV2.      ║
 -- ║  Ask cshimmin or sf-afe-skumar (LF admins on 913524911227).               ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -201,24 +201,94 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 --   )
 --   ENABLED = TRUE;
 --
--- CREATE OR REPLACE DATABASE dmichalk_glue_catalog_db
+-- DESCRIBE CATALOG INTEGRATION dmichalk_glue_iceberg_rest_int;
+--
+-- CREATE OR REPLACE DATABASE dmichalk_glue_iceberg_cld
 --   LINKED_CATALOG = (
---     CATALOG = 'dmichalk_glue_iceberg_rest_int'
+--     CATALOG = dmichalk_glue_iceberg_rest_int
 --     ALLOWED_NAMESPACES = ('dmichalk_sandbox_db')
 --   )
 --   EXTERNAL_VOLUME = 'dmichalk_glue_ext_vol'
 --   CATALOG_CASE_SENSITIVITY = CASE_INSENSITIVE;
 --
--- -- Auto-discovered table — no manual CREATE TABLE needed
--- SELECT * FROM dmichalk_glue_catalog_db.dmichalk_sandbox_db.orders LIMIT 10;
+-- SELECT SYSTEM$CATALOG_LINK_STATUS('dmichalk_glue_iceberg_cld');
+-- SELECT * FROM dmichalk_glue_iceberg_cld.dmichalk_sandbox_db.orders LIMIT 10;
 
 
 -- ╔══════════════════════════════════════════════════════════════════════════════╗
--- ║  SECTION 4: PARQUET DIRECT (TABLE_FORMAT = NONE)         PRIVATE PREVIEW  ║
+-- ║  SECTION 4: HIVE DIRECT CATALOG-LINKED DATABASE              [PP - HIVE]  ║
 -- ╠══════════════════════════════════════════════════════════════════════════════╣
--- ║  Query Parquet files directly — no Glue metadata needed.                  ║
+-- ║  Auto-discovers Hive/Parquet tables from Glue. Read-only.                 ║
+-- ║  Two paths: vended credentials (no ext vol) or external volume.           ║
+-- ║  Glue table: dmichalk_sandbox_db.orders_hive (48 hive partitions)         ║
+-- ║  PP not enabled on FXC11617.                                              ║
+-- ║  Ref: docs.snowflake.com/en/LIMITEDACCESS/iceberg/tutorials/              ║
+-- ║       tables-hive-direct-set-up-catalog-linked-database                   ║
+-- ╚══════════════════════════════════════════════════════════════════════════════╝
+
+-- Option A: Vended credentials (recommended — no external volume needed)
+--
+-- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_hive_direct_int
+--   CATALOG_SOURCE = GLUE
+--   TABLE_FORMAT = HIVE
+--   CATALOG_NAMESPACE = 'dmichalk_sandbox_db'
+--   REST_CONFIG = (
+--     CATALOG_API_TYPE = AWS_GLUE
+--     CATALOG_NAME = '913524911227'
+--     ACCESS_DELEGATION_MODE = 'VENDED_CREDENTIALS'
+--   )
+--   REST_AUTHENTICATION = (
+--     TYPE = SIGV4
+--     SIGV4_IAM_ROLE = 'arn:aws:iam::913524911227:role/dmichalk-snowflake-glue-access'
+--     SIGV4_SIGNING_REGION = 'us-east-1'
+--   )
+--   ENABLED = TRUE;
+--
+-- DESCRIBE CATALOG INTEGRATION dmichalk_hive_direct_int;
+-- -- Record GLUE_AWS_IAM_USER_ARN + SIGV4_EXTERNAL_ID → update IAM trust policy
+--
+-- CREATE OR REPLACE DATABASE dmichalk_glue_hive_cld
+--   LINKED_CATALOG = (
+--     CATALOG = dmichalk_hive_direct_int
+--     ALLOWED_NAMESPACES = ('dmichalk_sandbox_db')
+--     ALLOWED_WRITE_OPERATIONS = NONE
+--   );
+--
+-- SELECT SYSTEM$CATALOG_LINK_STATUS('dmichalk_glue_hive_cld');
+-- SELECT * FROM dmichalk_glue_hive_cld.dmichalk_sandbox_db.orders_hive LIMIT 10;
+
+-- Option B: External volume (uses IAM role for S3 access directly)
+--
+-- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_hive_direct_extv_int
+--   CATALOG_SOURCE = GLUE
+--   TABLE_FORMAT = HIVE
+--   CATALOG_NAMESPACE = 'dmichalk_sandbox_db'
+--   GLUE_AWS_ROLE_ARN = 'arn:aws:iam::913524911227:role/dmichalk-snowflake-glue-access'
+--   GLUE_CATALOG_ID = '913524911227'
+--   GLUE_REGION = 'us-east-1'
+--   ENABLED = TRUE;
+--
+-- DESCRIBE CATALOG INTEGRATION dmichalk_hive_direct_extv_int;
+-- -- Record GLUE_AWS_IAM_USER_ARN + GLUE_AWS_EXTERNAL_ID → update IAM trust policy
+--
+-- CREATE OR REPLACE DATABASE dmichalk_glue_hive_cld
+--   LINKED_CATALOG = (
+--     CATALOG = dmichalk_hive_direct_extv_int
+--     ALLOWED_NAMESPACES = ('dmichalk_sandbox_db')
+--     ALLOWED_WRITE_OPERATIONS = NONE
+--   )
+--   EXTERNAL_VOLUME = 'dmichalk_glue_ext_vol';
+--
+-- SELECT SYSTEM$CATALOG_LINK_STATUS('dmichalk_glue_hive_cld');
+-- SELECT * FROM dmichalk_glue_hive_cld.dmichalk_sandbox_db.orders_hive LIMIT 10;
+
+
+-- ╔══════════════════════════════════════════════════════════════════════════════╗
+-- ║  SECTION 5: PARQUET DIRECT (TABLE_FORMAT = NONE)         [PP - PARQUET]   ║
+-- ╠══════════════════════════════════════════════════════════════════════════════╣
+-- ║  Query Parquet files directly from S3 — no Glue metadata needed.          ║
 -- ║  Auto-refresh, hive-style partitioning, Iceberg-grade performance.        ║
--- ║  Not enabled on FXC11617.                                                 ║
+-- ║  PP not enabled on FXC11617.                                              ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 
 -- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_parquet_direct_int
@@ -233,30 +303,6 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 --   AUTO_REFRESH = TRUE;
 --
 -- SELECT * FROM orders_parquet_direct WHERE order_year = 2024 AND order_month = 6 LIMIT 10;
-
-
--- ╔══════════════════════════════════════════════════════════════════════════════╗
--- ║  SECTION 5: HIVE CATALOG INTEGRATION (TABLE_FORMAT = HIVE) PRIVATE PREVIEW║
--- ╠══════════════════════════════════════════════════════════════════════════════╣
--- ║  Query Hive/Parquet tables via Glue metadata with TABLE_FORMAT = HIVE.    ║
--- ║  Not enabled on FXC11617.                                                 ║
--- ╚══════════════════════════════════════════════════════════════════════════════╝
-
--- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_glue_hive_int
---   CATALOG_SOURCE = GLUE
---   TABLE_FORMAT = HIVE
---   GLUE_CATALOG_ID = '913524911227'
---   GLUE_AWS_ROLE_ARN = 'arn:aws:iam::913524911227:role/dmichalk-snowflake-glue-access'
---   GLUE_REGION = 'us-east-1'
---   ENABLED = TRUE;
---
--- CREATE OR REPLACE ICEBERG TABLE orders_hive
---   EXTERNAL_VOLUME = 'dmichalk_glue_ext_vol'
---   CATALOG = 'dmichalk_glue_hive_int'
---   CATALOG_TABLE_NAME = 'orders'
---   CATALOG_NAMESPACE = 'dmichalk_sandbox_db';
---
--- SELECT * FROM orders_hive WHERE order_year = 2024 AND order_month = 6 LIMIT 10;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
