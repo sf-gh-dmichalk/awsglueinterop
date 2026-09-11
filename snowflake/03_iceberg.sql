@@ -7,6 +7,8 @@
 -- Same 1M orders, but Iceberg metadata gives Snowflake:
 --   - Partition pruning from manifest (not file paths)
 --   - Row-group min/max stats → skip groups that can't match predicate
+--   - NULL count stats → skip groups that are entirely NULL for a column
+--   - Sorted key stats → skip row groups for point lookups on sorted columns
 --   - Native columnar reads → only reads projected columns from Parquet
 --   - Predicate pushdown into the Parquet reader
 --
@@ -103,6 +105,12 @@ SELECT * FROM dmichalk_glue_db.glue_tables.orders_iceberg LIMIT 5;
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Run 01_external_tables.sql first to create the external tables.
 -- All queries compare the same 1M rows across all three access methods.
+--
+-- Data characteristics (important for understanding the tests):
+--   - amount correlated with year: 2022=$5-50, 2023=$20-100, 2024=$50-180, 2025=$100-250
+--   - discount: NULL 100% months 1-3, ~70% NULL months 4-6, ~50% NULL 7-9, ~30% NULL 10-12
+--   - Sorted by (order_year, order_month, customer_id) → non-overlapping row groups
+--   - 48 partitions: 4 years × 12 months
 
 USE SCHEMA dmichalk_glue_db.glue_tables;
 ALTER SESSION SET USE_CACHED_RESULT = FALSE;
@@ -134,45 +142,28 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 -- ─────────────────────────────────────────────────────────────────────────────
 -- TEST 2: ROW-GROUP STATISTICS (Iceberg's secret weapon)
 -- ─────────────────────────────────────────────────────────────────────────────
--- PRESENTER: Filter on amount, NOT a partition column. External tables read
--- every row in every file. Iceberg checks row-group footer min/max and skips
--- groups where the predicate can't be satisfied.
---
--- amount > 240 hits ~4% of rows. Even the partitioned external table reads
--- ALL files because the filter isn't on a partition column.
+-- PRESENTER: Filters on non-partition columns. External tables read every row
+-- in every file. Iceberg checks row-group footer min/max and NULL counts,
+-- skipping groups where the predicate can't be satisfied.
 
-SELECT COUNT(*), SUM(amount) FROM orders_external_flat WHERE amount > 240;
-SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned WHERE amount > 240;
-SELECT COUNT(*), SUM(amount) FROM orders_iceberg WHERE amount > 240;
-
-SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
-  FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
- ORDER BY start_time DESC LIMIT 3;
-
--- Narrow range: amount BETWEEN 100 AND 110 (~4% of rows)
--- Iceberg skips groups where min(amount) > 110 OR max(amount) < 100.
-
-SELECT COUNT(*), SUM(amount) FROM orders_external_flat WHERE amount BETWEEN 100 AND 110;
-SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned WHERE amount BETWEEN 100 AND 110;
-SELECT COUNT(*), SUM(amount) FROM orders_iceberg WHERE amount BETWEEN 100 AND 110;
+-- 2a: amount > 200 — only 2025 data can have amount > 200
+-- Iceberg skips ALL 2022-2024 partitions (max amount in those years < 200).
+-- External tables read everything regardless.
+SELECT COUNT(*), SUM(amount) FROM orders_external_flat WHERE amount > 200;
+SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned WHERE amount > 200;
+SELECT COUNT(*), SUM(amount) FROM orders_iceberg WHERE amount > 200;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
  WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
 
-
--- ─────────────────────────────────────────────────────────────────────────────
--- TEST 3: COLUMN PRUNING (semi-structured vs native columnar)
--- ─────────────────────────────────────────────────────────────────────────────
--- PRESENTER: SELECT SUM(amount) only needs 1 column. Iceberg reads just that
--- column from Parquet. External tables read the full row as VARIANT then
--- extract the field — no columnar projection at the storage layer.
-
-SELECT SUM(amount) FROM orders_external_flat WHERE order_year = 2024;
-SELECT SUM(amount) FROM orders_external_partitioned WHERE order_year = 2024;
-SELECT SUM(amount) FROM orders_iceberg WHERE order_year = 2024;
+-- 2b: discount IS NOT NULL — Q1 months are 100% NULL
+-- Iceberg skips row groups where null_count = row_count (all Q1 partitions).
+-- External tables scan everything and discard NULLs after the fact.
+SELECT COUNT(*), SUM(discount) FROM orders_external_flat WHERE discount IS NOT NULL;
+SELECT COUNT(*), SUM(discount) FROM orders_external_partitioned WHERE discount IS NOT NULL;
+SELECT COUNT(*), SUM(discount) FROM orders_iceberg WHERE discount IS NOT NULL;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
@@ -181,20 +172,51 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- TEST 4: THE MONEY SHOT — ALL THREE OPTIMIZATIONS COMBINED
+-- TEST 3: CUSTOMER_ID POINT LOOKUP (sorted-data row-group skipping)
 -- ─────────────────────────────────────────────────────────────────────────────
--- PRESENTER: Partition pruning + row-group stats + column pruning in one query.
--- Iceberg: 1 partition, skips groups where max(amount)<=200, reads 3 columns.
--- Flat external: 48 files, all rows, all columns. Potentially 50-100x gap.
+-- PRESENTER: customer_id is sorted within each partition, so row groups have
+-- tight, non-overlapping min/max ranges for customer_id.
+-- Iceberg: prunes to 2024 (partition), then skips row groups where
+--   min(customer_id) > 42 OR max(customer_id) < 42.
+-- Partitioned ext: prunes to 2024 files but reads all rows in those files.
+-- Flat ext: scans everything.
 
-SELECT order_id, product, amount FROM orders_external_flat
- WHERE order_year = 2025 AND order_month = 3 AND amount > 200;
+SELECT COUNT(*), SUM(amount) FROM orders_external_flat
+ WHERE customer_id = 42 AND order_year = 2024;
 
-SELECT order_id, product, amount FROM orders_external_partitioned
- WHERE order_year = 2025 AND order_month = 3 AND amount > 200;
+SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned
+ WHERE customer_id = 42 AND order_year = 2024;
 
-SELECT order_id, product, amount FROM orders_iceberg
- WHERE order_year = 2025 AND order_month = 3 AND amount > 200;
+SELECT COUNT(*), SUM(amount) FROM orders_iceberg
+ WHERE customer_id = 42 AND order_year = 2024;
+
+SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
+  FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
+ ORDER BY start_time DESC LIMIT 3;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TEST 4: THE MONEY SHOT — ALL OPTIMIZATIONS COMBINED
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PRESENTER: This query combines every advantage at once:
+--   1. Partition pruning: order_year=2025 AND order_month=3 → 1 of 48 partitions
+--   2. Row-group stats on amount: skip groups where max(amount) <= 200
+--   3. NULL skipping on discount: month 3 is 100% NULL for discount
+--      → Iceberg sees null_count = row_count in the manifest and returns 0 rows
+--         INSTANTLY without reading any data at all.
+-- External flat: scans all 48 files, all rows, all columns.
+-- External partitioned: prunes to 1 file but still reads everything in it.
+-- Iceberg: prunes to 1 partition, then sees discount is 100% NULL → 0 rows, near-zero I/O.
+
+SELECT order_id, product, amount, discount FROM orders_external_flat
+ WHERE order_year = 2025 AND order_month = 3 AND amount > 200 AND discount IS NOT NULL;
+
+SELECT order_id, product, amount, discount FROM orders_external_partitioned
+ WHERE order_year = 2025 AND order_month = 3 AND amount > 200 AND discount IS NOT NULL;
+
+SELECT order_id, product, amount, discount FROM orders_iceberg
+ WHERE order_year = 2025 AND order_month = 3 AND amount > 200 AND discount IS NOT NULL;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
@@ -209,15 +231,18 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 -- External tables do JSON-like extraction per row (value:col::TYPE).
 
 SELECT order_year, order_month, customer_tier,
-       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order
+       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order,
+       SUM(discount) AS total_discount
   FROM orders_external_flat GROUP BY 1,2,3;
 
 SELECT order_year, order_month, customer_tier,
-       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order
+       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order,
+       SUM(discount) AS total_discount
   FROM orders_external_partitioned GROUP BY 1,2,3;
 
 SELECT order_year, order_month, customer_tier,
-       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order
+       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order,
+       SUM(discount) AS total_discount
   FROM orders_iceberg GROUP BY 1,2,3;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
@@ -230,16 +255,27 @@ SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
 -- SUMMARY
 -- ═══════════════════════════════════════════════════════════════════════════════
 --
--- ┌─────────────────────┬──────────────────┬──────────────────┬──────────────────┐
--- │ Feature             │ External Flat    │ External Part.   │ Iceberg          │
--- ├─────────────────────┼──────────────────┼──────────────────┼──────────────────┤
--- │ Partition pruning   │ ✗ scans all 48   │ ✓ prunes to 1    │ ✓ prunes to 1    │
--- │ Row-group stats     │ ✗ reads all rows │ ✗ reads all rows │ ✓ skips groups   │
--- │ Column pruning      │ ✗ full VARIANT   │ ✗ full VARIANT   │ ✓ named columns  │
--- │ Native typed reads  │ ✗ value:col cast │ ✗ value:col cast │ ✓ direct Parquet │
--- │ Schema evolution    │ ✗ manual         │ ✗ manual         │ ✓ Iceberg spec   │
--- │ Time travel         │ ✗ none           │ ✗ none           │ ✓ snapshots      │
--- └─────────────────────┴──────────────────┴──────────────────┴──────────────────┘
+-- ┌─────────────────────────┬──────────────────┬──────────────────┬──────────────────┐
+-- │ Feature                 │ External Flat    │ External Part.   │ Iceberg          │
+-- ├─────────────────────────┼──────────────────┼──────────────────┼──────────────────┤
+-- │ Partition pruning       │ ✗ scans all 48   │ ✓ prunes to 1    │ ✓ prunes to 1    │
+-- │ Row-group min/max stats │ ✗ reads all rows │ ✗ reads all rows │ ✓ skips groups   │
+-- │ NULL count skipping     │ ✗ reads all rows │ ✗ reads all rows │ ✓ skips all-NULL │
+-- │ Sorted-key skipping     │ ✗ reads all rows │ ✗ reads all rows │ ✓ tight ranges   │
+-- │ Column pruning          │ ✗ full VARIANT   │ ✗ full VARIANT   │ ✓ named columns  │
+-- │ Native typed reads      │ ✗ value:col cast │ ✗ value:col cast │ ✓ direct Parquet │
+-- │ Schema evolution        │ ✗ manual         │ ✗ manual         │ ✓ Iceberg spec   │
+-- │ Time travel             │ ✗ none           │ ✗ none           │ ✓ snapshots      │
+-- └─────────────────────────┴──────────────────┴──────────────────┴──────────────────┘
+--
+-- ┌─────────────────────────────────────────────────────────────────────────────────────┐
+-- │ Test Highlights (clustered data)                                                   │
+-- ├───────────────────────────────┬─────────────────────────────────────────────────────┤
+-- │ amount > 200                  │ Iceberg skips all 2022-2024 (max < 200)            │
+-- │ discount IS NOT NULL          │ Iceberg skips Q1 groups (100% NULL)                │
+-- │ customer_id = 42 (2024)       │ Iceberg skips groups via sorted min/max            │
+-- │ 2025/03 + amount>200 + disc.  │ Iceberg: 0 rows (month 3 discount 100% NULL)       │
+-- └───────────────────────────────┴─────────────────────────────────────────────────────┘
 --
 -- ┌─────────────────────────────────┬──────────────┬─────────────────────────────┐
 -- │ Additional Tech                 │ Status       │ What it adds                │

@@ -42,6 +42,7 @@ CREATE OR REPLACE EXTERNAL TABLE dmichalk_glue_db.glue_tables.orders_external_fl
     customer_id   INT    AS (value:customer_id::INT),
     product       STRING AS (value:product::STRING),
     amount        DOUBLE AS (value:amount::DOUBLE),
+    discount      DOUBLE AS (value:discount::DOUBLE),
     customer_tier STRING AS (value:customer_tier::STRING),
     order_date    STRING AS (value:order_date::STRING)
   )
@@ -58,6 +59,7 @@ CREATE OR REPLACE EXTERNAL TABLE dmichalk_glue_db.glue_tables.orders_external_pa
     customer_id   INT    AS (value:customer_id::INT),
     product       STRING AS (value:product::STRING),
     amount        DOUBLE AS (value:amount::DOUBLE),
+    discount      DOUBLE AS (value:discount::DOUBLE),
     customer_tier STRING AS (value:customer_tier::STRING),
     order_date    STRING AS (value:order_date::STRING)
   )
@@ -92,42 +94,73 @@ SELECT COUNT(*) AS cnt, SUM(amount) AS total
   FROM orders_external_partitioned
  WHERE order_year = 2024 AND order_month = 6;
 
--- DEMO 3: Limitation — no row-group stats even with partitions
--- PRESENTER: Filter on amount (not a partition col). Both variants scan all rows.
--- External tables ignore Parquet footer min/max statistics entirely.
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_external_flat
- WHERE amount > 240;
-
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_external_partitioned
- WHERE amount > 240;
-
--- Compare bytes
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
  WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
- ORDER BY start_time DESC LIMIT 4;
+ ORDER BY start_time DESC LIMIT 2;
 
--- DEMO 4: Limitation — semi-structured column access
--- PRESENTER: Even SELECT SUM(amount) reads the entire row as VARIANT,
--- then extracts amount. There's no columnar projection at the storage layer.
-SELECT SUM(amount) AS total_revenue
-  FROM orders_external_flat;
 
-SELECT SUM(amount) AS total_revenue
-  FROM orders_external_partitioned;
+-- DEMO 3: amount > 200 — external tables scan everything
+-- PRESENTER: Only 2025 data has amount > 200 (year-correlated ranges:
+-- 2022=$5-50, 2023=$20-100, 2024=$50-180, 2025=$100-250).
+-- External tables ignore Parquet row-group min/max stats, so they read all files.
+SELECT COUNT(*) AS cnt, SUM(amount) AS total
+  FROM orders_external_flat
+ WHERE amount > 200;
+
+SELECT COUNT(*) AS cnt, SUM(amount) AS total
+  FROM orders_external_partitioned
+ WHERE amount > 200;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
  WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 2;
 
+
+-- DEMO 4: discount IS NOT NULL — external tables scan everything
+-- PRESENTER: discount is NULL for 100% of Q1 rows (months 1-3), ~70% NULL months 4-6,
+-- ~50% NULL months 7-9, ~30% NULL months 10-12. External tables have no stats to
+-- skip all-NULL row groups — they read and discard every row.
+SELECT COUNT(*) AS cnt, SUM(discount) AS total_discount
+  FROM orders_external_flat
+ WHERE discount IS NOT NULL;
+
+SELECT COUNT(*) AS cnt, SUM(discount) AS total_discount
+  FROM orders_external_partitioned
+ WHERE discount IS NOT NULL;
+
+SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
+  FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
+ ORDER BY start_time DESC LIMIT 2;
+
+
+-- DEMO 5: customer_id = 42 — external tables scan everything, no row-group skipping
+-- PRESENTER: Data is sorted by (order_year, order_month, customer_id) with
+-- non-overlapping row groups. Iceberg can skip groups where min > 42 OR max < 42.
+-- External tables have no access to row-group stats — full scan every time.
+SELECT COUNT(*) AS cnt, SUM(amount) AS total
+  FROM orders_external_flat
+ WHERE customer_id = 42;
+
+SELECT COUNT(*) AS cnt, SUM(amount) AS total
+  FROM orders_external_partitioned
+ WHERE customer_id = 42;
+
+SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
+  FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
+ ORDER BY start_time DESC LIMIT 2;
+
+
 -- ┌───────────────────────┬──────────────────┬──────────────────────┐
 -- │ Limitation            │ Flat External    │ Partitioned External │
 -- ├───────────────────────┼──────────────────┼──────────────────────┤
 -- │ Partition pruning     │ ✗ none           │ ✓ hive path only     │
 -- │ Row-group stats       │ ✗ ignored        │ ✗ ignored            │
+-- │ NULL skipping         │ ✗ ignored        │ ✗ ignored            │
+-- │ Sorted-key skipping   │ ✗ ignored        │ ✗ ignored            │
 -- │ Column pruning        │ ✗ full VARIANT   │ ✗ full VARIANT       │
 -- │ Predicate pushdown    │ ✗ none           │ ✗ none               │
 -- └───────────────────────┴──────────────────┴──────────────────────┘

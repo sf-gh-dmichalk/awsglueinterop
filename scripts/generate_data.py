@@ -28,6 +28,8 @@ from pyiceberg.types import (
     StringType,
 )
 
+import pyarrow.compute as pc
+
 BUCKET = "dmichalk-glue-sandbox"
 REGION = "us-east-1"
 GLUE_DB = "dmichalk_sandbox_db"
@@ -56,16 +58,43 @@ def generate_orders(n_rows=1_000_000, n_customers=50_000):
 
     dates = [start + timedelta(days=random.randint(0, delta_days)) for _ in range(n_rows)]
 
-    return pa.table({
+    # Amount correlated with year — tight ranges per partition so row-group
+    # min/max stats enable real skipping.
+    #   2022: $5-50    2023: $20-100    2024: $50-180    2025: $100-250
+    amount_ranges = {2022: (5.0, 50.0), 2023: (20.0, 100.0), 2024: (50.0, 180.0), 2025: (100.0, 250.0)}
+    amounts = [round(random.uniform(*amount_ranges[d.year]), 2) for d in dates]
+
+    # Discount: NULL for ~80% of rows. Non-null values clustered by month:
+    #   months 1-3: always NULL, months 4-6: 30% non-null, months 7-9: 50%, months 10-12: 70%
+    null_rates = {1: 1.0, 2: 1.0, 3: 1.0, 4: 0.7, 5: 0.7, 6: 0.7,
+                  7: 0.5, 8: 0.5, 9: 0.5, 10: 0.3, 11: 0.3, 12: 0.3}
+    discounts = []
+    for d in dates:
+        if random.random() < null_rates[d.month]:
+            discounts.append(None)
+        else:
+            discounts.append(round(random.uniform(1.0, 50.0), 2))
+
+    customer_ids = [random.randint(1, n_customers) for _ in range(n_rows)]
+
+    table = pa.table({
         "order_id": pa.array(list(range(1, n_rows + 1)), type=pa.int32()),
-        "customer_id": pa.array([random.randint(1, n_customers) for _ in range(n_rows)], type=pa.int32()),
+        "customer_id": pa.array(customer_ids, type=pa.int32()),
         "product": [random.choice(PRODUCTS) for _ in range(n_rows)],
-        "amount": [round(random.uniform(5.99, 249.99), 2) for _ in range(n_rows)],
+        "amount": amounts,
+        "discount": pa.array(discounts, type=pa.float64()),
         "customer_tier": [random.choice(TIERS) for _ in range(n_rows)],
         "order_date": [d.strftime("%Y-%m-%d") for d in dates],
         "order_year": pa.array([d.year for d in dates], type=pa.int32()),
         "order_month": pa.array([d.month for d in dates], type=pa.int32()),
     })
+
+    # Sort by customer_id within each partition so row groups have
+    # non-overlapping customer_id ranges → enables skipping on point lookups.
+    sort_indices = pc.sort_indices(table, sort_keys=[
+        ("order_year", "ascending"), ("order_month", "ascending"), ("customer_id", "ascending")
+    ])
+    return table.take(sort_indices)
 
 
 def upload_hive_partitioned(table, bucket, prefix, region):
@@ -96,18 +125,19 @@ ICEBERG_SCHEMA = Schema(
     NestedField(field_id=2, name="customer_id", field_type=IntegerType(), required=False),
     NestedField(field_id=3, name="product", field_type=StringType(), required=False),
     NestedField(field_id=4, name="amount", field_type=DoubleType(), required=False),
-    NestedField(field_id=5, name="customer_tier", field_type=StringType(), required=False),
-    NestedField(field_id=6, name="order_date", field_type=StringType(), required=False),
-    NestedField(field_id=7, name="order_year", field_type=IntegerType(), required=False),
-    NestedField(field_id=8, name="order_month", field_type=IntegerType(), required=False),
+    NestedField(field_id=5, name="discount", field_type=DoubleType(), required=False),
+    NestedField(field_id=6, name="customer_tier", field_type=StringType(), required=False),
+    NestedField(field_id=7, name="order_date", field_type=StringType(), required=False),
+    NestedField(field_id=8, name="order_year", field_type=IntegerType(), required=False),
+    NestedField(field_id=9, name="order_month", field_type=IntegerType(), required=False),
 )
 
 PARTITION_SPEC = PartitionSpec(
-    PartitionField(source_id=7, field_id=1000, transform=IdentityTransform(), name="order_year"),
-    PartitionField(source_id=8, field_id=1001, transform=IdentityTransform(), name="order_month"),
+    PartitionField(source_id=8, field_id=1000, transform=IdentityTransform(), name="order_year"),
+    PartitionField(source_id=9, field_id=1001, transform=IdentityTransform(), name="order_month"),
 )
 
-SORT_ORDER = SortOrder(SortField(source_id=7), SortField(source_id=8))
+SORT_ORDER = SortOrder(SortField(source_id=8), SortField(source_id=9))
 
 
 def write_iceberg(table, bucket, db, region):

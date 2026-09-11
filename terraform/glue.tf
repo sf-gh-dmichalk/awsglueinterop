@@ -61,6 +61,10 @@ resource "aws_glue_catalog_table" "orders_hive" {
       name = "order_date"
       type = "string"
     }
+    columns {
+      name = "discount"
+      type = "double"
+    }
   }
 
   partition_keys {
