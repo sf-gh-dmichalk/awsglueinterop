@@ -115,6 +115,7 @@
 | Glue Table | `customers` (Hive/Parquet, 100 rows) | `terraform/glue.tf` |
 | Glue Table | `orders` (Hive/Parquet, 500 rows) | `terraform/glue.tf` |
 | Glue Table | `products` (Iceberg, 50 rows) | created by `scripts/generate_data.py` |
+| Glue Table | `orders_partitioned` (Iceberg, 1M rows, partitioned by year/month) | created by `scripts/generate_perf_data.py` |
 | IAM Role | `dmichalk-snowflake-glue-access` | `terraform/iam.tf` |
 | IAM Policy | `glue-catalog-access` (inline) | `terraform/iam.tf` |
 | IAM Policy | `s3-data-access` (inline) | `terraform/iam.tf` |
@@ -129,18 +130,25 @@ dmichalk-glue-sandbox/
 ├── data/
 │   ├── hive/
 │   │   ├── customers/
-│   │   │   └── data.parquet          (4 KB, 100 rows)
+│   │   │   └── data.parquet                 (4 KB, 100 rows)
 │   │   └── orders/
-│   │       └── data.parquet          (11 KB, 500 rows)
+│   │       └── data.parquet                 (11 KB, 500 rows)
+│   ├── partitioned/
+│   │   └── orders/                          (17 MB total, 1M rows)
+│   │       ├── order_year=2022/
+│   │       │   ├── order_month=01/data.parquet
+│   │       │   ├── order_month=02/data.parquet
+│   │       │   └── ... (12 months)
+│   │       ├── order_year=2023/ ...
+│   │       ├── order_year=2024/ ...
+│   │       └── order_year=2025/ ...         (48 partition files total)
 │   └── iceberg/
-│       └── products/
-│           ├── data/
-│           │   └── 00000-*.parquet   (3 KB, 50 rows)
-│           └── metadata/
-│               ├── 00000-*.metadata.json
-│               ├── 00001-*.metadata.json
-│               ├── *-m0.avro
-│               └── snap-*.avro
+│       ├── products/                        (3 KB, 50 rows)
+│       │   ├── data/*.parquet
+│       │   └── metadata/*.json,*.avro
+│       └── orders_partitioned/              (32 MB, 1M rows)
+│           ├── data/*.parquet               (partitioned by year/month)
+│           └── metadata/*.json,*.avro
 ```
 
 ### Snowflake Objects
@@ -148,11 +156,16 @@ dmichalk-glue-sandbox/
 | Object | Name | Status |
 |---|---|---|
 | External Volume | `DMICHALK_GLUE_EXT_VOL` | ✅ Active |
+| Storage Integration | `DMICHALK_S3_INTEGRATION` (for external tables/stage) | ✅ Active |
+| Stage | `DMICHALK_GLUE_DB.GLUE_TABLES.DMICHALK_S3_STAGE` | ✅ Active |
 | Catalog Integration | `DMICHALK_GLUE_ICEBERG_INT` (GLUE, TABLE_FORMAT=ICEBERG) | ✅ Active |
 | Catalog Integration | `DMICHALK_GLUE_ICEBERG_REST_INT` (ICEBERG_REST) | ✅ Created, blocked by LF |
 | Database | `DMICHALK_GLUE_DB` | ✅ Active |
 | Schema | `DMICHALK_GLUE_DB.GLUE_TABLES` | ✅ Active |
-| Iceberg Table | `DMICHALK_GLUE_DB.GLUE_TABLES.PRODUCTS` | ✅ Queryable (50 rows) |
+| Iceberg Table | `GLUE_TABLES.PRODUCTS` | ✅ Queryable (50 rows) |
+| Iceberg Table | `GLUE_TABLES.ORDERS_ICEBERG_PARTITIONED` | ✅ Queryable (1M rows, partitioned) |
+| External Table | `GLUE_TABLES.ORDERS_EXTERNAL_FLAT` | ✅ Queryable (1M rows, no pruning) |
+| External Table | `GLUE_TABLES.ORDERS_EXTERNAL_PARTITIONED` | ✅ Queryable (1M rows, path-based pruning) |
 
 ### Glue Table Schemas
 
@@ -182,6 +195,44 @@ dmichalk-glue-sandbox/
 | category | string (food/toys/beds/accessories/health/grooming) |
 | price | double |
 | in_stock | boolean |
+
+**orders_partitioned** (Iceberg, 1M rows — perf comparison dataset)
+| Column | Type | Notes |
+|---|---|---|
+| order_id | int | |
+| customer_id | int | 1-50,000 |
+| product | string | 30 product SKUs |
+| amount | double | 5.99-249.99 |
+| customer_tier | string | bronze/silver/gold/platinum |
+| order_date | string | 2022-01-01 to 2025-12-31 |
+| order_year | int | Partition key |
+| order_month | int | Partition key |
+
+---
+
+## Performance Comparison: External Tables vs Iceberg
+
+The 1M-row `orders_partitioned` dataset exists in three forms for comparison:
+
+| Table | Type | Partition Pruning | Column Pruning | Row-group Stats | Predicate Pushdown |
+|---|---|---|---|---|---|
+| `orders_external_flat` | External Table | None — scans all 48 files | No (semi-structured) | No | No |
+| `orders_external_partitioned` | External Table | Path-based (year/month from filename) | No (semi-structured) | No | No |
+| `orders_iceberg_partitioned` | Iceberg Table | Spec-based (year/month) | Yes (native Parquet) | Yes (min/max) | Yes |
+
+### Why Iceberg is faster
+
+1. **Partition pruning**: `WHERE order_year = 2024 AND order_month = 6` reads 1 of 48 partitions. The flat external table reads all 48.
+2. **Native columnar reads**: External tables parse Parquet as semi-structured (`value:col::TYPE`), requiring JSON-like extraction per row. Iceberg reads Parquet columns natively — direct memory mapping.
+3. **Row-group statistics**: Iceberg uses Parquet footer min/max stats to skip row groups. `WHERE amount > 200` skips groups where `max(amount) <= 200`. External tables can't do this.
+4. **Predicate pushdown**: Iceberg pushes filters into the Parquet reader. External tables apply filters after full extraction.
+
+### How to run the comparison
+
+See `snowflake/comparison.sql` for 4 test queries with instructions on what to observe in query profiles. Run each test's three variants (flat, partitioned ext, Iceberg) and compare:
+- **Partitions/files scanned** in the query profile
+- **Bytes scanned**
+- **Query duration**
 
 ---
 
@@ -225,12 +276,18 @@ awsglueinterop/
 │   ├── lakeformation.tf             # LF resource registration + DB grants
 │   └── terraform.tfvars.example     # Example variable values
 ├── scripts/
-│   ├── generate_data.py             # Generates Parquet (customers/orders) +
+│   ├── generate_data.py             # Small datasets: Parquet (customers/orders) +
 │   │                                  Iceberg (products) via pyarrow/pyiceberg
+│   ├── generate_perf_data.py        # 1M-row partitioned orders: hive-style Parquet
+│   │                                  (48 files) + partitioned Iceberg table in Glue
 │   └── requirements.txt             # pyarrow, boto3, pyiceberg
 └── snowflake/
-    └── setup.sql                    # External volume, catalog integrations,
-                                       Iceberg table DDL, blocked sections commented
+    ├── setup.sql                    # Core: external volume, catalog integration, Iceberg table
+    ├── external_tables.sql          # Storage integration, stage, external tables (flat + partitioned)
+    ├── comparison.sql               # 4 perf test queries: ext flat vs ext partitioned vs Iceberg
+    ├── preview_parquet_direct.sql   # PP: TABLE_FORMAT=NONE (Parquet Direct)
+    ├── preview_hive_integration.sql # PP: TABLE_FORMAT=HIVE (Glue Hive tables)
+    └── preview_catalog_linked_db.sql # Blocked: Glue REST + catalog-linked DB (needs LF admin)
 ```
 
 ---
@@ -238,12 +295,14 @@ awsglueinterop/
 ## Execution Order
 
 1. **`terraform apply`** — creates S3, Glue DB + Hive tables, IAM role, Lake Formation grants
-2. **`python scripts/generate_data.py`** — uploads Parquet files, creates Iceberg table + data in Glue
-3. **Snowflake DDL** (`snowflake/setup.sql`) — creates external volume, catalog integration, Iceberg table
-4. **`DESCRIBE CATALOG INTEGRATION`** + **`DESCRIBE EXTERNAL VOLUME`** — get Snowflake IAM user ARN + external IDs
-5. **Set `snowflake_iam_user_arn` + `snowflake_external_ids` in `terraform.tfvars`**
-6. **`terraform apply`** again — updates IAM trust policy with Snowflake identity
-7. **Verify** — `SELECT * FROM dmichalk_glue_db.glue_tables.products LIMIT 10;`
+2. **`python scripts/generate_data.py`** — uploads small Parquet files + Iceberg products table
+3. **`python scripts/generate_perf_data.py`** — uploads 1M-row partitioned Parquet + Iceberg orders
+4. **Snowflake DDL** (`snowflake/setup.sql`) — creates external volume, catalog integration, Iceberg tables
+5. **Snowflake DDL** (`snowflake/external_tables.sql`) — creates storage integration, stage, external tables
+6. **`DESCRIBE` integrations** — get Snowflake IAM user ARN + external IDs
+7. **Set `snowflake_iam_user_arn` + `snowflake_external_ids` in `terraform.tfvars`**
+8. **`terraform apply`** again — updates IAM trust policy with Snowflake identity
+9. **Run `snowflake/comparison.sql`** — benchmark external tables vs Iceberg
 
 ---
 
