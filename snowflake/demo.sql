@@ -1,267 +1,284 @@
 -- ╔══════════════════════════════════════════════════════════════════════════════╗
--- ║  ICEBERG vs EXTERNAL TABLES: Why Format Matters                            ║
--- ║  Live Demo — 1M Orders Dataset (2022-2025)                                 ║
+-- ║  AWS GLUE + SNOWFLAKE INTEROP DEMO                                        ║
+-- ║  1M Orders — External Tables vs Iceberg vs Preview Tech                   ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 --
--- PRESENTER NOTES:
--- This demo shows why Iceberg tables outperform external tables on the same
--- underlying Parquet data. Three identical datasets, three different access
--- methods, dramatically different performance.
+-- Region: us-east-1 | AWS Account: 913524911227 | Snowflake: FXC11617
+-- Dataset: 1M orders, 48 monthly partitions (~20K rows each)
+--          amount range 5.99-249.99, customer_tier: bronze/silver/gold/platinum
 --
--- Dataset: 1M orders, 48 monthly partitions (~20K rows each), amount range 5.99-249.99
---
--- Tables:
+-- Three tables, same data, different access methods:
 --   orders_external_flat         — External table, no partition awareness
 --   orders_external_partitioned  — External table, hive-style partition paths
---   orders_iceberg   — Iceberg table via Glue catalog, partitioned
---
--- After each act, we pull bytes_scanned from QUERY_HISTORY to make the
--- comparison concrete. Tell the audience to watch the query profile too.
-
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- ACT 0: SETUP & VERIFY
--- ═══════════════════════════════════════════════════════════════════════════════
--- PRESENTER: Run these first to set context. Confirm all three tables have
--- the same 1M rows so the audience trusts the comparison is apples-to-apples.
+--   orders_iceberg               — Iceberg table via Glue catalog, partitioned
 
 USE DATABASE dmichalk_glue_db;
 USE SCHEMA glue_tables;
-USE WAREHOUSE dmichalk_wh;
+ALTER SESSION SET USE_CACHED_RESULT = FALSE;  -- force fresh reads for fair comparison
 
--- Verify row counts — all three should return 1,000,000
-SELECT 'external_flat' AS table_type, COUNT(*) AS row_count
-  FROM orders_external_flat
+
+-- ╔══════════════════════════════════════════════════════════════════════════════╗
+-- ║  SECTION 1: EXTERNAL TABLES (Parquet on S3)                               ║
+-- ╠══════════════════════════════════════════════════════════════════════════════╣
+-- ║  Shows how external tables work and their limitations:                     ║
+-- ║  - Semi-structured column access (value:col::TYPE)                        ║
+-- ║  - No Parquet row-group stats usage                                       ║
+-- ║  - Partition pruning only if hive paths are explicitly wired up           ║
+-- ╚══════════════════════════════════════════════════════════════════════════════╝
+
+-- Verify row counts
+SELECT 'external_flat' AS table_type, COUNT(*) AS row_count FROM orders_external_flat
 UNION ALL
-SELECT 'external_partitioned', COUNT(*)
-  FROM orders_external_partitioned
+SELECT 'external_partitioned', COUNT(*) FROM orders_external_partitioned
 UNION ALL
-SELECT 'iceberg_partitioned', COUNT(*)
-  FROM orders_iceberg;
+SELECT 'iceberg', COUNT(*) FROM orders_iceberg;
 
--- Quick look at the data shape
-SELECT * FROM orders_iceberg LIMIT 5;
+-- Quick look at the data
+SELECT * FROM orders_external_flat LIMIT 5;
 
--- PRESENTER: Point out the DDL differences if asked. External tables access
--- Parquet through semi-structured value extraction (value:col::type).
--- Iceberg tables have native typed columns registered via the Glue catalog.
-
-
--- ═══════════════════════════════════════════════════════════════════════════════
--- ACT 1: THE PARTITION PRUNING GAP
--- ═══════════════════════════════════════════════════════════════════════════════
--- PRESENTER: Same filter — "give me June 2024." Watch how many files each
--- table type touches. Open the query profile and check:
---   • "Partitions scanned" vs "Partitions total"
---   • "Files scanned" in the TableScan node
---
--- Expected:
---   Flat external    → scans all 48 files (no partition awareness)
---   Partitioned ext  → scans 1 file  (hive path pruning works)
---   Iceberg          → scans 1 file  (manifest-level partition pruning)
-
--- 1a. External flat — no partition pruning
+-- DEMO: Flat external table — scans ALL 48 files regardless of filter
 SELECT COUNT(*) AS cnt, SUM(amount) AS total
   FROM orders_external_flat
- WHERE order_year = 2024 AND order_month = 6;
+ WHERE order_date LIKE '2024-06%';
 
--- 1b. External partitioned — hive-style pruning kicks in
+-- DEMO: Partitioned external table — prunes to 1 file via hive path
 SELECT COUNT(*) AS cnt, SUM(amount) AS total
   FROM orders_external_partitioned
  WHERE order_year = 2024 AND order_month = 6;
 
--- 1c. Iceberg — manifest-level pruning
+
+-- ╔══════════════════════════════════════════════════════════════════════════════╗
+-- ║  SECTION 2: ICEBERG TABLE (via Glue Catalog Integration)                  ║
+-- ╠══════════════════════════════════════════════════════════════════════════════╣
+-- ║  Same data, but Iceberg metadata gives Snowflake:                         ║
+-- ║  - Partition pruning from manifest (not file paths)                       ║
+-- ║  - Row-group min/max stats → skip groups that can't match predicate       ║
+-- ║  - Native columnar reads → only reads projected columns from Parquet      ║
+-- ║  - Predicate pushdown into the Parquet reader                             ║
+-- ╚══════════════════════════════════════════════════════════════════════════════╝
+
+-- Same query, Iceberg table — prunes partition + uses stats
 SELECT COUNT(*) AS cnt, SUM(amount) AS total
   FROM orders_iceberg
  WHERE order_year = 2024 AND order_month = 6;
 
--- Compare bytes scanned across the three queries
--- PRESENTER: The flat table reads ~48x more data than the other two.
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- PERF TEST 1: PARTITION PRUNING GAP
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- PRESENTER: Open query profiles side by side. Check "Partitions scanned"
+-- and "Files scanned". Flat = 48 files, Partitioned = 1, Iceberg = 1.
+
+SELECT COUNT(*), SUM(amount) FROM orders_external_flat
+ WHERE order_date LIKE '2024-06%';
+
+SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned
+ WHERE order_year = 2024 AND order_month = 6;
+
+SELECT COUNT(*), SUM(amount) FROM orders_iceberg
+ WHERE order_year = 2024 AND order_month = 6;
+
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%'
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- ACT 2: ROW-GROUP STATISTICS — ICEBERG'S SECRET WEAPON
+-- PERF TEST 2: ROW-GROUP STATISTICS (Iceberg's secret weapon)
 -- ═══════════════════════════════════════════════════════════════════════════════
--- PRESENTER: This is the key insight. Parquet files store min/max stats in
--- each row-group footer. Iceberg's manifest tracks these stats and uses them
--- to skip row groups entirely. External tables? They ignore the stats and
--- read every row, then filter.
+-- PRESENTER: Filter on amount, NOT a partition column. External tables must
+-- read every row. Iceberg checks row-group footer min/max and skips groups
+-- where the predicate can't be satisfied.
 --
--- amount is uniform [5.99, 249.99]. Filtering amount > 240 hits only ~4%
--- of rows, but that data could be in ANY row group. Iceberg checks the
--- row-group max(amount) and skips groups where max <= 240. External tables
--- read everything.
+-- amount > 240 hits ~4% of rows. amount BETWEEN 100 AND 110 hits ~4%.
 
--- 2a. Highly selective filter: amount > 240 (~4% of rows)
+-- Highly selective: amount > 240
+SELECT COUNT(*), SUM(amount) FROM orders_external_flat WHERE amount > 240;
+SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned WHERE amount > 240;
+SELECT COUNT(*), SUM(amount) FROM orders_iceberg WHERE amount > 240;
 
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_external_flat
- WHERE amount > 240;
-
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_external_partitioned
- WHERE amount > 240;
-
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_iceberg
- WHERE amount > 240;
-
--- PRESENTER: Even the partitioned external table reads ALL files here —
--- the filter is on amount, not a partition column. Iceberg still wins
--- because it skips row groups using footer stats.
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%'
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
 
--- 2b. Narrow range filter: amount BETWEEN 100 AND 110 (~4% of rows)
--- PRESENTER: Even more dramatic. Iceberg can skip row groups where
--- min(amount) > 110 OR max(amount) < 100. External tables read everything.
-
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_external_flat
- WHERE amount BETWEEN 100 AND 110;
-
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_external_partitioned
- WHERE amount BETWEEN 100 AND 110;
-
-SELECT COUNT(*) AS cnt, SUM(amount) AS total
-  FROM orders_iceberg
- WHERE amount BETWEEN 100 AND 110;
+-- Narrow range: amount BETWEEN 100 AND 110
+SELECT COUNT(*), SUM(amount) FROM orders_external_flat WHERE amount BETWEEN 100 AND 110;
+SELECT COUNT(*), SUM(amount) FROM orders_external_partitioned WHERE amount BETWEEN 100 AND 110;
+SELECT COUNT(*), SUM(amount) FROM orders_iceberg WHERE amount BETWEEN 100 AND 110;
 
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%'
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- ACT 3: COLUMN PRUNING — SEMI-STRUCTURED vs NATIVE COLUMNAR
+-- PERF TEST 3: COLUMN PRUNING (semi-structured vs native)
 -- ═══════════════════════════════════════════════════════════════════════════════
--- PRESENTER: External tables store all columns in a single VARIANT (the
--- value column). Even if you only need SUM(amount), the engine reads the
--- entire row from Parquet and extracts the field. Iceberg tables have
--- native typed columns — Snowflake reads ONLY the columns in the query.
---
--- This query needs just `amount` plus partition columns. Watch bytes_scanned:
--- Iceberg should read a fraction of what external tables read.
+-- PRESENTER: SELECT SUM(amount) only needs 1 column. Iceberg reads just that
+-- column from Parquet. External tables deserialize the full row (VARIANT).
 
-SELECT SUM(amount) AS total_revenue
-  FROM orders_external_flat
- WHERE order_year = 2024;
+SELECT SUM(amount) FROM orders_external_flat WHERE order_year = 2024;
+SELECT SUM(amount) FROM orders_external_partitioned WHERE order_year = 2024;
+SELECT SUM(amount) FROM orders_iceberg WHERE order_year = 2024;
 
-SELECT SUM(amount) AS total_revenue
-  FROM orders_external_partitioned
- WHERE order_year = 2024;
-
-SELECT SUM(amount) AS total_revenue
-  FROM orders_iceberg
- WHERE order_year = 2024;
-
--- PRESENTER: Iceberg reads far fewer bytes — it only touches the `amount`
--- column on disk. External tables must deserialize the full row.
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%'
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- ACT 4: THE MONEY SHOT — ALL THREE OPTIMIZATIONS COMBINED
+-- PERF TEST 4: THE MONEY SHOT — ALL THREE OPTIMIZATIONS COMBINED
 -- ═══════════════════════════════════════════════════════════════════════════════
--- PRESENTER: This is the cumulative payoff. One query that benefits from:
---   1. Partition pruning   → order_year=2025 AND order_month=3 → 1 of 48 files
---   2. Row-group stats     → amount > 200 → skip groups where max(amount) <= 200
---   3. Column pruning      → only reads order_id, product, amount columns
---
--- External flat gets NONE of these. External partitioned gets only #1.
--- Iceberg gets all three.
+-- PRESENTER: Partition pruning + row-group stats + column pruning in one query.
+-- Iceberg: 1 partition, skips groups where max(amount)<=200, reads 3 columns.
+-- Flat external: 48 files, all rows, all columns. Potentially 50-100x gap.
 
-SELECT order_id, product, amount
-  FROM orders_external_flat
- WHERE order_year = 2025
-   AND order_month = 3
-   AND amount > 200;
+SELECT order_id, product, amount FROM orders_external_flat
+ WHERE order_year = 2025 AND order_month = 3 AND amount > 200;
 
-SELECT order_id, product, amount
-  FROM orders_external_partitioned
- WHERE order_year = 2025
-   AND order_month = 3
-   AND amount > 200;
+SELECT order_id, product, amount FROM orders_external_partitioned
+ WHERE order_year = 2025 AND order_month = 3 AND amount > 200;
 
-SELECT order_id, product, amount
-  FROM orders_iceberg
- WHERE order_year = 2025
-   AND order_month = 3
-   AND amount > 200;
+SELECT order_id, product, amount FROM orders_iceberg
+ WHERE order_year = 2025 AND order_month = 3 AND amount > 200;
 
--- PRESENTER: Compare the bytes_scanned. The gap between flat and Iceberg
--- should be enormous — potentially 50-100x difference.
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%'
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- ACT 5: FULL SCAN WITH AGGREGATION
+-- PERF TEST 5: FULL SCAN AGGREGATION
 -- ═══════════════════════════════════════════════════════════════════════════════
--- PRESENTER: "But what if I need ALL the data?" Even on a full table scan,
--- Iceberg wins because it reads native typed columns directly from Parquet.
--- External tables do semi-structured extraction (value:col::TYPE) per row —
--- essentially JSON-like parsing overhead on every field.
+-- PRESENTER: Even scanning all data, Iceberg reads native typed columns.
+-- External tables do JSON-like extraction per row (value:col::TYPE).
 
 SELECT order_year, order_month, customer_tier,
-       COUNT(*)    AS order_count,
-       SUM(amount) AS total_revenue,
-       AVG(amount) AS avg_order_value
-  FROM orders_external_flat
- GROUP BY 1, 2, 3;
+       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order
+  FROM orders_external_flat GROUP BY 1,2,3;
 
 SELECT order_year, order_month, customer_tier,
-       COUNT(*)    AS order_count,
-       SUM(amount) AS total_revenue,
-       AVG(amount) AS avg_order_value
-  FROM orders_external_partitioned
- GROUP BY 1, 2, 3;
+       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order
+  FROM orders_external_partitioned GROUP BY 1,2,3;
 
 SELECT order_year, order_month, customer_tier,
-       COUNT(*)    AS order_count,
-       SUM(amount) AS total_revenue,
-       AVG(amount) AS avg_order_value
-  FROM orders_iceberg
- GROUP BY 1, 2, 3;
+       COUNT(*) AS orders, SUM(amount) AS revenue, AVG(amount) AS avg_order
+  FROM orders_iceberg GROUP BY 1,2,3;
 
--- PRESENTER: Even scanning all 1M rows, Iceberg reads fewer bytes because
--- it only touches the 4 columns needed (not the full row VARIANT).
 SELECT query_text, bytes_scanned, rows_produced, total_elapsed_time
   FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 10))
- WHERE query_text NOT LIKE '%QUERY_HISTORY%'
+ WHERE query_text NOT LIKE '%QUERY_HISTORY%' AND query_text NOT LIKE '%ALTER%'
  ORDER BY start_time DESC LIMIT 3;
+
+
+-- ╔══════════════════════════════════════════════════════════════════════════════╗
+-- ║  SECTION 3: CATALOG-LINKED DATABASE (Glue Iceberg REST)                   ║
+-- ╠══════════════════════════════════════════════════════════════════════════════╣
+-- ║  GA feature. Auto-discovers tables from Glue via Iceberg REST endpoint.   ║
+-- ║  BLOCKED on this account: needs Lake Formation admin to grant              ║
+-- ║  GetTemporaryCredentialsForTableV2 to the IAM role.                       ║
+-- ║  Ask cshimmin or sf-afe-skumar (LF admins on 913524911227).               ║
+-- ╚══════════════════════════════════════════════════════════════════════════════╝
+
+-- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_glue_iceberg_rest_int
+--   CATALOG_SOURCE = ICEBERG_REST
+--   TABLE_FORMAT = ICEBERG
+--   CATALOG_NAMESPACE = 'dmichalk_sandbox_db'
+--   REST_CONFIG = (
+--     CATALOG_URI = 'https://glue.us-east-1.amazonaws.com/iceberg'
+--     CATALOG_API_TYPE = AWS_GLUE
+--     CATALOG_NAME = '913524911227'
+--   )
+--   REST_AUTHENTICATION = (
+--     TYPE = SIGV4
+--     SIGV4_IAM_ROLE = 'arn:aws:iam::913524911227:role/dmichalk-snowflake-glue-access'
+--     SIGV4_SIGNING_REGION = 'us-east-1'
+--   )
+--   ENABLED = TRUE;
+--
+-- CREATE OR REPLACE DATABASE dmichalk_glue_catalog_db
+--   LINKED_CATALOG = (
+--     CATALOG = 'dmichalk_glue_iceberg_rest_int'
+--     ALLOWED_NAMESPACES = ('dmichalk_sandbox_db')
+--   )
+--   EXTERNAL_VOLUME = 'dmichalk_glue_ext_vol'
+--   CATALOG_CASE_SENSITIVITY = CASE_INSENSITIVE;
+--
+-- -- Auto-discovered table — no manual CREATE TABLE needed
+-- SELECT * FROM dmichalk_glue_catalog_db.dmichalk_sandbox_db.orders LIMIT 10;
+
+
+-- ╔══════════════════════════════════════════════════════════════════════════════╗
+-- ║  SECTION 4: PARQUET DIRECT (TABLE_FORMAT = NONE)         PRIVATE PREVIEW  ║
+-- ╠══════════════════════════════════════════════════════════════════════════════╣
+-- ║  Query Parquet files directly — no Glue metadata needed.                  ║
+-- ║  Auto-refresh, hive-style partitioning, Iceberg-grade performance.        ║
+-- ║  Not enabled on FXC11617.                                                 ║
+-- ╚══════════════════════════════════════════════════════════════════════════════╝
+
+-- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_parquet_direct_int
+--   CATALOG_SOURCE = OBJECT_STORE
+--   TABLE_FORMAT = NONE
+--   ENABLED = TRUE;
+--
+-- CREATE OR REPLACE ICEBERG TABLE orders_parquet_direct
+--   EXTERNAL_VOLUME = 'dmichalk_glue_ext_vol'
+--   CATALOG = 'dmichalk_parquet_direct_int'
+--   BASE_LOCATION = 'data/parquet/orders/'
+--   AUTO_REFRESH = TRUE;
+--
+-- SELECT * FROM orders_parquet_direct WHERE order_year = 2024 AND order_month = 6 LIMIT 10;
+
+
+-- ╔══════════════════════════════════════════════════════════════════════════════╗
+-- ║  SECTION 5: HIVE CATALOG INTEGRATION (TABLE_FORMAT = HIVE) PRIVATE PREVIEW║
+-- ╠══════════════════════════════════════════════════════════════════════════════╣
+-- ║  Query Hive/Parquet tables via Glue metadata with TABLE_FORMAT = HIVE.    ║
+-- ║  Not enabled on FXC11617.                                                 ║
+-- ╚══════════════════════════════════════════════════════════════════════════════╝
+
+-- CREATE OR REPLACE CATALOG INTEGRATION dmichalk_glue_hive_int
+--   CATALOG_SOURCE = GLUE
+--   TABLE_FORMAT = HIVE
+--   GLUE_CATALOG_ID = '913524911227'
+--   GLUE_AWS_ROLE_ARN = 'arn:aws:iam::913524911227:role/dmichalk-snowflake-glue-access'
+--   GLUE_REGION = 'us-east-1'
+--   ENABLED = TRUE;
+--
+-- CREATE OR REPLACE ICEBERG TABLE orders_hive
+--   EXTERNAL_VOLUME = 'dmichalk_glue_ext_vol'
+--   CATALOG = 'dmichalk_glue_hive_int'
+--   CATALOG_TABLE_NAME = 'orders'
+--   CATALOG_NAMESPACE = 'dmichalk_sandbox_db';
+--
+-- SELECT * FROM orders_hive WHERE order_year = 2024 AND order_month = 6 LIMIT 10;
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- SUMMARY
 -- ═══════════════════════════════════════════════════════════════════════════════
 --
--- ┌───────────────────────┬──────────────────┬──────────────────┬──────────────────┐
--- │ Optimization          │ External Flat    │ External Part.   │ Iceberg          │
--- ├───────────────────────┼──────────────────┼──────────────────┼──────────────────┤
--- │ Partition pruning     │ ✗ scans all 48   │ ✓ prunes to 1    │ ✓ prunes to 1    │
--- │ Row-group stats       │ ✗ reads all rows │ ✗ reads all rows │ ✓ skips groups   │
--- │ Column pruning        │ ✗ full VARIANT   │ ✗ full VARIANT   │ ✓ named columns  │
--- │ Native typed reads    │ ✗ value:col cast │ ✗ value:col cast │ ✓ direct Parquet │
--- └───────────────────────┴──────────────────┴──────────────────┴──────────────────┘
+-- ┌─────────────────────┬──────────────────┬──────────────────┬──────────────────┐
+-- │ Feature             │ External Flat    │ External Part.   │ Iceberg          │
+-- ├─────────────────────┼──────────────────┼──────────────────┼──────────────────┤
+-- │ Partition pruning   │ ✗ scans all 48   │ ✓ prunes to 1    │ ✓ prunes to 1    │
+-- │ Row-group stats     │ ✗ reads all rows │ ✗ reads all rows │ ✓ skips groups   │
+-- │ Column pruning      │ ✗ full VARIANT   │ ✗ full VARIANT   │ ✓ named columns  │
+-- │ Native typed reads  │ ✗ value:col cast │ ✗ value:col cast │ ✓ direct Parquet │
+-- │ Schema evolution    │ ✗ manual         │ ✗ manual         │ ✓ Iceberg spec   │
+-- │ Time travel         │ ✗ none           │ ✗ none           │ ✓ snapshots      │
+-- └─────────────────────┴──────────────────┴──────────────────┴──────────────────┘
 --
--- KEY TAKEAWAY: Same Parquet files, same S3 bucket, same data — but Iceberg's
--- metadata layer (manifests + stats) lets Snowflake skip work at every level.
--- External tables treat Parquet as a dumb container. Iceberg treats it as an
--- optimized storage format.
---
--- The cost of this advantage? Maintaining a catalog (Glue/Polaris/etc.) that
--- tracks partition manifests and column-level statistics. That's it.
+-- Upcoming tech (Sections 3-5):
+-- ┌─────────────────────────────────┬──────────────┬─────────────────────────────┐
+-- │ Tech                            │ Status       │ What it adds                │
+-- ├─────────────────────────────────┼──────────────┼─────────────────────────────┤
+-- │ Catalog-Linked DB (Glue REST)   │ GA (LF req.) │ Auto-discover tables        │
+-- │ Parquet Direct (FORMAT=NONE)    │ Priv. Preview│ No catalog, auto-refresh    │
+-- │ Hive Integration (FORMAT=HIVE)  │ Priv. Preview│ Glue Hive metadata support  │
+-- └─────────────────────────────────┴──────────────┴─────────────────────────────┘

@@ -64,7 +64,7 @@
   <p class="subtitle">Catalog Integration, External Tables, and Iceberg Tables via AWS Glue Data Catalog</p>
 
   <div class="accounts-bar">
-    <span class="account-tag account-aws">AWS 913524911227 &middot; us-west-2</span>
+    <span class="account-tag account-aws">AWS 913524911227 &middot; us-east-1</span>
     <span class="account-tag account-sf">Snowflake FXC11617</span>
   </div>
 
@@ -80,23 +80,17 @@
   <div class="diagram-wrap">
     <pre class="mermaid">
 flowchart TB
-  subgraph AWS["<b>AWS Account 913524911227 (us-west-2)</b>"]
+  subgraph AWS["<b>AWS Account 913524911227 (us-east-1)</b>"]
     direction TB
     subgraph S3["S3: dmichalk-glue-sandbox"]
       direction TB
-      HP["data/hive/customers/\n(Parquet, 100 rows)"]
-      HO["data/hive/orders/\n(Parquet, 500 rows)"]
-      PO["data/partitioned/orders/\n(Parquet, 1M rows, 48 files\nyear/month partitioned)"]
-      IP["data/iceberg/products/\n(Iceberg, 50 rows)"]
-      IO["data/iceberg/orders_partitioned/\n(Iceberg, 1M rows\nyear/month partitioned)"]
+      PO["data/parquet/orders/\n(Hive-partitioned Parquet\n1M rows, 48 files by year/month)"]
+      IO["data/iceberg/orders/\n(Iceberg format\n1M rows, partitioned by year/month)"]
     end
 
     subgraph GLUE["Glue Data Catalog: dmichalk_sandbox_db"]
       direction TB
-      GC["customers\n(Hive/Parquet)"]
-      GO["orders\n(Hive/Parquet)"]
-      GP["products\n(Iceberg)"]
-      GPO["orders_partitioned\n(Iceberg, partitioned)"]
+      GT["orders\n(Iceberg, partitioned)"]
     end
 
     subgraph IAM["IAM Role: dmichalk-snowflake-glue-access"]
@@ -107,7 +101,7 @@ flowchart TB
       TRUST["Trust: Snowflake IAM user\n+ external IDs"]
     end
 
-    LF["Lake Formation\nS3 registered, DB grants"]
+    LF["Lake Formation\nIAM_ALLOWED_PRINCIPALS default"]
   end
 
   subgraph SF["<b>Snowflake Account FXC11617</b>"]
@@ -118,39 +112,29 @@ flowchart TB
       direction TB
       EV["External Volume\nDMICHALK_GLUE_EXT_VOL\ns3://dmichalk-glue-sandbox/"]
       SI["Storage Integration\nDMICHALK_S3_INTEGRATION"]
-      CI["Catalog Integration\nDMICHALK_GLUE_ICEBERG_INT\nGLUE, TABLE_FORMAT=ICEBERG ✅"]
+      CI["Catalog Integration\nDMICHALK_GLUE_ICEBERG_INT\nGLUE, TABLE_FORMAT=ICEBERG"]
       STG["Stage\nDMICHALK_S3_STAGE"]
     end
 
     subgraph DB["DMICHALK_GLUE_DB.GLUE_TABLES"]
       direction TB
-      T1["PRODUCTS\n(Iceberg, 50 rows) ✅"]
-      T2["ORDERS_ICEBERG_PARTITIONED\n(Iceberg, 1M rows) ✅"]
-      T3["ORDERS_EXTERNAL_FLAT\n(External Table, 1M rows\nno pruning) ✅"]
-      T4["ORDERS_EXTERNAL_PARTITIONED\n(External Table, 1M rows\npath-based pruning) ✅"]
+      T1["ORDERS_ICEBERG\n(Iceberg, 1M rows) ✅"]
+      T2["ORDERS_EXTERNAL_FLAT\n(External Table, 1M rows\nno pruning) ✅"]
+      T3["ORDERS_EXTERNAL_PARTITIONED\n(External Table, 1M rows\npath-based pruning) ✅"]
     end
   end
 
   STS -->|"sts:AssumeRole"| IAM
-  CI -->|"glue:GetTable\nglue:GetTables"| GLUE
-  EV -->|"s3:GetObject\ns3:ListBucket"| S3
-  STG -->|"s3:GetObject\ns3:ListBucket"| S3
-  SI -->|"s3:GetObject"| S3
+  CI -->|"glue:GetTable"| GLUE
+  EV -->|"s3:GetObject"| S3
+  STG -->|"s3:GetObject"| S3
 
   CI --> T1
-  CI --> T2
   EV --> T1
-  EV --> T2
+  STG --> T2
   STG --> T3
-  STG --> T4
 
-  GP -.->|"metadata"| IP
-  GPO -.->|"metadata"| IO
-  GC -.->|"metadata"| HP
-  GO -.->|"metadata"| HO
-
-  LF -.->|"grants"| GLUE
-  LF -.->|"S3 registration"| S3
+  GT -.->|"metadata"| IO
 
   classDef awsStyle fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12
   classDef sfStyle fill:#eff6ff,stroke:#3b82f6,stroke-width:2px,color:#1e3a5f
@@ -163,11 +147,11 @@ flowchart TB
 
   class AWS awsStyle
   class SF sfStyle
-  class HP,HO,PO,IP,IO s3Style
-  class GC,GO,GP,GPO glueStyle
+  class PO,IO s3Style
+  class GT glueStyle
   class P1,P2,P3,TRUST iamStyle
   class EV,SI,CI,STG,STS sfIntStyle
-  class T1,T2,T3,T4 sfTblStyle
+  class T1,T2,T3 sfTblStyle
   class LF lfStyle
     </pre>
   </div>
@@ -261,30 +245,23 @@ flowchart TB
       </thead>
       <tbody>
         <tr>
-          <td>PRODUCTS</td>
+          <td>ORDERS_ICEBERG</td>
           <td>Iceberg</td>
-          <td>data/iceberg/products/</td>
-          <td>50</td>
-          <td><span class="badge-yes">Working</span></td>
-        </tr>
-        <tr>
-          <td>ORDERS_ICEBERG_PARTITIONED</td>
-          <td>Iceberg</td>
-          <td>data/iceberg/orders_partitioned/</td>
+          <td>data/iceberg/orders/</td>
           <td>1,000,000</td>
           <td><span class="badge-yes">Working</span></td>
         </tr>
         <tr>
           <td>ORDERS_EXTERNAL_FLAT</td>
           <td>External Table</td>
-          <td>data/partitioned/orders/</td>
+          <td>data/parquet/orders/</td>
           <td>1,000,000</td>
           <td><span class="badge-yes">Working</span></td>
         </tr>
         <tr>
           <td>ORDERS_EXTERNAL_PARTITIONED</td>
           <td>External Table</td>
-          <td>data/partitioned/orders/</td>
+          <td>data/parquet/orders/</td>
           <td>1,000,000</td>
           <td><span class="badge-yes">Working</span></td>
         </tr>
