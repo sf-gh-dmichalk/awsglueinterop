@@ -1,7 +1,7 @@
 locals {
   # When Snowflake identity is not yet known, trust our own account so
   # terraform apply can succeed on the first pass.
-  use_snowflake_trust = var.snowflake_iam_user_arn != "" && var.snowflake_external_id != ""
+  use_snowflake_trust = var.snowflake_iam_user_arn != "" && length(var.snowflake_external_ids) > 0
 }
 
 # -----------------------------------------------------------------------------
@@ -22,7 +22,7 @@ resource "aws_iam_role" "snowflake_glue_access" {
         Action = "sts:AssumeRole"
         Condition = {
           StringEquals = {
-            "sts:ExternalId" = var.snowflake_external_id
+            "sts:ExternalId" = var.snowflake_external_ids
           }
         }
       }

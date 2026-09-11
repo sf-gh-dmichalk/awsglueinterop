@@ -28,8 +28,8 @@ variable "snowflake_iam_user_arn" {
   default     = ""
 }
 
-variable "snowflake_external_id" {
-  description = "Snowflake external ID from DESCRIBE CATALOG INTEGRATION (set after Step 3)"
-  type        = string
-  default     = ""
+variable "snowflake_external_ids" {
+  description = "Snowflake external IDs from DESCRIBE CATALOG INTEGRATION and DESCRIBE EXTERNAL VOLUME"
+  type        = list(string)
+  default     = []
 }
