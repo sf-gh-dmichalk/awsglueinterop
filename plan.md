@@ -7,8 +7,8 @@ Stand up an AWS Glue Data Catalog with:
 2. **Iceberg table** — in the same Glue database, backed by Iceberg format on S3
 
 Then connect it all to Snowflake via:
-- A **Hive catalog integration** (`TABLE_FORMAT = HIVE`) for the Parquet tables
-- A **Glue Iceberg REST catalog integration** (`CATALOG_SOURCE = ICEBERG_REST`) for the Iceberg table, enabling a **catalog-linked database**
+- A **Hive catalog integration** (`TABLE_FORMAT = HIVE`) for the Parquet tables — **currently private preview, not yet enabled on account FXC11617; SQL is commented out in `snowflake/setup.sql`**
+- A **Glue Iceberg REST catalog integration** (`CATALOG_SOURCE = ICEBERG_REST`) for the Iceberg table, enabling a **catalog-linked database** — this is GA and ready to use
 
 ---
 
