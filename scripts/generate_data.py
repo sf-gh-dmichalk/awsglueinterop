@@ -18,9 +18,9 @@ from pyiceberg.types import (
     StringType,
 )
 
-BUCKET = "chewy-glue-sandbox-913524911227"
+BUCKET = "dmichalk-glue-sandbox"
 REGION = "us-west-2"
-GLUE_DB = "chewy_sandbox_db"
+GLUE_DB = "dmichalk_sandbox_db"
 
 TIERS = ["bronze", "silver", "gold", "platinum"]
 PRODUCTS = [
@@ -67,7 +67,7 @@ def generate_orders(n=500, num_customers=100):
 # ── Iceberg: products ──────────────────────────────────────────────────────
 def generate_products_data(n=50):
     rows = {
-        "product_id": list(range(1, n + 1)),
+        "product_id": pa.array(list(range(1, n + 1)), type=pa.int32()),
         "name": [random.choice(PRODUCTS) for _ in range(n)],
         "category": [random.choice(CATEGORIES) for _ in range(n)],
         "price": [round(random.uniform(3.99, 89.99), 2) for _ in range(n)],
@@ -77,28 +77,30 @@ def generate_products_data(n=50):
 
 
 PRODUCTS_ICEBERG_SCHEMA = Schema(
-    NestedField(field_id=1, name="product_id", field_type=IntegerType(), required=True),
-    NestedField(field_id=2, name="name", field_type=StringType(), required=True),
-    NestedField(field_id=3, name="category", field_type=StringType(), required=True),
-    NestedField(field_id=4, name="price", field_type=DoubleType(), required=True),
-    NestedField(field_id=5, name="in_stock", field_type=BooleanType(), required=True),
+    NestedField(field_id=1, name="product_id", field_type=IntegerType(), required=False),
+    NestedField(field_id=2, name="name", field_type=StringType(), required=False),
+    NestedField(field_id=3, name="category", field_type=StringType(), required=False),
+    NestedField(field_id=4, name="price", field_type=DoubleType(), required=False),
+    NestedField(field_id=5, name="in_stock", field_type=BooleanType(), required=False),
 )
 
 
-def upload_parquet(table: pa.Table, bucket: str, key: str):
-    s3 = boto3.client("s3", region_name=REGION)
+def upload_parquet(table: pa.Table, bucket: str, key: str, region: str = REGION):
+    s3 = boto3.client("s3", region_name=region)
     buf = pa.BufferOutputStream()
     pq.write_table(table, buf)
     s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue().to_pybytes())
     print(f"  Uploaded s3://{bucket}/{key}")
 
 
-def write_iceberg_table(bucket: str, db: str):
+def write_iceberg_table(bucket: str, db: str, region: str = REGION):
     catalog = GlueCatalog(
         name="glue",
         **{
             "warehouse": f"s3://{bucket}/data/iceberg",
-            "region_name": REGION,
+            "glue.region": region,
+            "s3.region": region,
+            "region_name": region,
         },
     )
 
@@ -129,19 +131,17 @@ def main():
     parser.add_argument("--region", default=REGION, help="AWS region")
     parser.add_argument("--database", default=GLUE_DB, help="Glue database name")
     args = parser.parse_args()
-
-    global REGION
-    REGION = args.region
+    region = args.region
 
     print("Generating Parquet data...")
     customers = generate_customers()
-    upload_parquet(customers, args.bucket, "data/hive/customers/data.parquet")
+    upload_parquet(customers, args.bucket, "data/hive/customers/data.parquet", region)
 
     orders = generate_orders()
-    upload_parquet(orders, args.bucket, "data/hive/orders/data.parquet")
+    upload_parquet(orders, args.bucket, "data/hive/orders/data.parquet", region)
 
     print("\nGenerating Iceberg data...")
-    write_iceberg_table(args.bucket, args.database)
+    write_iceberg_table(args.bucket, args.database, region)
 
     print("\nDone.")
 

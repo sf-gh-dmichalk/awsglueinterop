@@ -1,6 +1,7 @@
-aws_region      = "us-west-2"
-aws_account_id  = "913524911227"
-bucket_name     = "chewy-glue-sandbox-913524911227"
+aws_region         = "us-west-2"
+aws_account_id     = "913524911227"
+bucket_name        = "dmichalk-glue-sandbox"
+glue_database_name = "dmichalk_sandbox_db"
 
 # Set these after running DESCRIBE CATALOG INTEGRATION in Snowflake,
 # then re-run terraform apply to update the IAM trust policy.

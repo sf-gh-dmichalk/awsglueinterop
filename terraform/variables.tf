@@ -13,13 +13,13 @@ variable "aws_account_id" {
 variable "bucket_name" {
   description = "S3 bucket name for Glue data"
   type        = string
-  default     = "chewy-glue-sandbox-913524911227"
+  default     = "dmichalk-glue-sandbox"
 }
 
 variable "glue_database_name" {
   description = "Glue database name"
   type        = string
-  default     = "chewy_sandbox_db"
+  default     = "dmichalk_sandbox_db"
 }
 
 variable "snowflake_iam_user_arn" {

@@ -8,7 +8,7 @@ locals {
 # IAM Role — assumed by Snowflake
 # -----------------------------------------------------------------------------
 resource "aws_iam_role" "snowflake_glue_access" {
-  name = "snowflake-glue-access"
+  name = "dmichalk-snowflake-glue-access"
 
   assume_role_policy = local.use_snowflake_trust ? jsonencode({
     Version = "2012-10-17"
